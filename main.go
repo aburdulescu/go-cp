@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -21,18 +22,7 @@ func main() {
 	}
 }
 
-func run() error {
-	args := os.Args[1:]
-	if len(args) < 1 {
-		return errors.New("missing src file")
-	}
-	if len(args) < 2 {
-		return errors.New("missing dst file")
-	}
-	inFile := os.Args[1]
-	outFile := os.Args[2]
-
-	os.Remove(outFile)
+func conc(inFile, outFile string) error {
 	in, err := os.Open(inFile)
 	if err != nil {
 		return err
@@ -87,6 +77,54 @@ func run() error {
 	}
 
 	wg.Wait()
+
+	return nil
+}
+
+func seq(inFile, outFile string) error {
+	in, err := os.Open(inFile)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(outFile)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func run() error {
+	var mode string
+	flag.StringVar(&mode, "m", "s", "Mode: sequential(s) or concurrent(c)")
+	flag.Parse()
+
+	args := flag.Args()
+	if len(args) < 1 {
+		return errors.New("missing src file")
+	}
+	if len(args) < 2 {
+		return errors.New("missing dst file")
+	}
+	inFile := args[0]
+	outFile := args[1]
+
+	if mode == "c" {
+		if err := conc(inFile, outFile); err != nil {
+			return err
+		}
+	} else {
+		if err := seq(inFile, outFile); err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
