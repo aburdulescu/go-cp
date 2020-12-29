@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -11,7 +10,9 @@ import (
 )
 
 const (
-	chunkSize = 8 << 20
+	MB = 1 << 20
+
+	chunkSize = 8 * MB
 )
 
 func main() {
@@ -22,7 +23,25 @@ func main() {
 	}
 }
 
-func conc(inFile, outFile string) error {
+func run() error {
+	args := os.Args[1:]
+	if len(args) < 1 {
+		return errors.New("missing src file")
+	}
+	if len(args) < 2 {
+		return errors.New("missing dst file")
+	}
+	inFile := args[0]
+	outFile := args[1]
+
+	if err := doCopy(inFile, outFile); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func doCopy(inFile, outFile string) error {
 	in, err := os.Open(inFile)
 	if err != nil {
 		return err
@@ -34,99 +53,90 @@ func conc(inFile, outFile string) error {
 		return err
 	}
 
-	fileSize := fi.Size()
+	inSize := fi.Size()
 
-	out, err := os.Create(outFile)
-	if err != nil {
-		return err
-	}
-	if err := out.Truncate(fileSize); err != nil {
-		return err
-	}
-	out.Close()
-
-	n := int(fileSize / chunkSize)
-
-	rwinfos := make([]rwinfo, 0, n)
-	for i := 0; i < n; i++ {
-		r := io.NewSectionReader(in, int64(i*chunkSize), chunkSize)
-		w, err := NewSectionWriter(outFile, int64(i*chunkSize), chunkSize)
+	if inSize < chunkSize*2 {
+		out, err := os.Create(outFile)
 		if err != nil {
 			return err
 		}
-		defer w.Close()
-		rwinfos = append(rwinfos, rwinfo{r, w})
+		defer out.Close()
+		if _, err := io.Copy(out, in); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	if err := createOutFile(outFile, inSize); err != nil {
+		return err
+	}
+
+	rwinfos, err := getRWInfos(inSize, in, outFile)
+	if err != nil {
+		return err
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(n)
+	wg.Add(len(rwinfos))
 
 	for i, rwi := range rwinfos {
 		go func(wg *sync.WaitGroup, info rwinfo, i int) {
 			defer wg.Done()
-			buf := make([]byte, chunkSize)
-			n, err := io.CopyBuffer(info.w, info.r, buf)
+			n, err := io.Copy(info.w, info.r)
 			if err != nil {
 				log.Println(n, err)
 				return
-			}
-			if n != chunkSize {
-				log.Println(i, n)
 			}
 		}(&wg, rwi, i)
 	}
 
 	wg.Wait()
 
+	for _, rwi := range rwinfos {
+		rwi.w.Close()
+	}
+
 	return nil
 }
 
-func seq(inFile, outFile string) error {
-	in, err := os.Open(inFile)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
+func createOutFile(outFile string, inSize int64) error {
 	out, err := os.Create(outFile)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-
-	if _, err := io.Copy(out, in); err != nil {
+	if err := out.Truncate(inSize); err != nil {
 		return err
 	}
+	out.Close()
 
 	return nil
 }
 
-func run() error {
-	var mode string
-	flag.StringVar(&mode, "m", "s", "Mode: sequential(s) or concurrent(c)")
-	flag.Parse()
+func getRWInfos(inSize int64, in *os.File, outFile string) ([]rwinfo, error) {
 
-	args := flag.Args()
-	if len(args) < 1 {
-		return errors.New("missing src file")
-	}
-	if len(args) < 2 {
-		return errors.New("missing dst file")
-	}
-	inFile := args[0]
-	outFile := args[1]
+	n := int(inSize / chunkSize)
 
-	if mode == "c" {
-		if err := conc(inFile, outFile); err != nil {
-			return err
+	rwinfos := make([]rwinfo, 0, n)
+	for i := 0; i < n-1; i++ {
+		r := io.NewSectionReader(in, int64(i*chunkSize), chunkSize)
+		w, err := NewSectionWriter(outFile, int64(i*chunkSize), chunkSize)
+		if err != nil {
+			return nil, err
 		}
-	} else {
-		if err := seq(inFile, outFile); err != nil {
-			return err
-		}
+		rwinfos = append(rwinfos, rwinfo{r, w})
 	}
 
-	return nil
+	// add last element
+	off := int64((n - 1) * chunkSize)
+	size := inSize - off
+	r := io.NewSectionReader(in, off, size)
+	w, err := NewSectionWriter(outFile, off, size)
+	if err != nil {
+		return nil, err
+	}
+	rwinfos = append(rwinfos, rwinfo{r, w})
+
+	return rwinfos, nil
 }
 
 type rwinfo struct {
